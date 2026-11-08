@@ -1,0 +1,10 @@
+# Optional settings for runs from your laptop. scripts/up.sh passes the image digests.
+# Copy to terraform.tfvars and edit (the file is git-ignored, so GitHub Actions never sees it:
+# for the Control workflow use the repository variables SHIPIT_DOMAIN / SHIPIT_ZONE_ID instead).
+
+# Turn on HTTPS on your own domain (needs a Route 53 hosted zone, $0.50/month):
+# domain_name    = "shipit.example.com"
+# hosted_zone_id = "Z0123456789ABCDEFGHIJ"
+
+# Restrict who can open the demo (e.g. only your IP while recording):
+# allowed_cidrs = ["203.0.113.10/32"]

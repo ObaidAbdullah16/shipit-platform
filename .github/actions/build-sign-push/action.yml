@@ -1,0 +1,120 @@
+name: Build, scan, sign and push
+description: >-
+  Builds one ShipIt image for linux/arm64, fails on fixable HIGH/CRITICAL
+  vulnerabilities, pushes it to ECR (or, for AWS accounts that GitHub cannot
+  log in to, to GitHub's container registry ghcr.io) tagged with the commit SHA,
+  signs it with cosign (keyless, GitHub OIDC) and attaches an SPDX SBOM attestation.
+inputs:
+  service:
+    description: api or worker
+    required: true
+  version:
+    description: Version string baked into the image
+    required: true
+  registry:
+    description: "ecr (needs AWS credentials) or ghcr (needs packages: write; scripts/release-pull.sh copies it into ECR)"
+    required: false
+    default: ecr
+outputs:
+  image:
+    description: Pushed image reference by digest (repo@sha256:...)
+    value: ${{ steps.result.outputs.image }}
+runs:
+  using: composite
+  steps:
+    - name: Log in to the registry
+      id: ecr
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        REGISTRY: ${{ inputs.registry }}
+        GH_TOKEN: ${{ github.token }}
+        OWNER: ${{ github.repository_owner }}
+      run: |
+        if [[ "$REGISTRY" == ghcr ]]; then
+          repo="ghcr.io/${OWNER,,}/shipit-$SERVICE"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          # If this commit was already built, reuse that image.
+          digest="$(docker buildx imagetools inspect "$repo:$GITHUB_SHA" --format '{{json .Manifest}}' 2>/dev/null | jq -r '.digest // empty' || true)"
+        else
+          repo="$(aws ecr describe-repositories --repository-names "shipit/$SERVICE" --query 'repositories[0].repositoryUri' --output text)"
+          registry="${repo%%/*}"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          # Tags are immutable: if this commit was already released, reuse that image.
+          digest="$(aws ecr describe-images --repository-name "shipit/$SERVICE" --image-ids "imageTag=$GITHUB_SHA" \
+            --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+        fi
+        if [[ "$digest" == sha256:* ]]; then
+          echo "existing=$repo@$digest" >> "$GITHUB_OUTPUT"
+          echo "::notice::shipit-$SERVICE for $GITHUB_SHA already exists - reusing it"
+        fi
+
+    - name: Build (native arm64)
+      if: steps.ecr.outputs.existing == ''
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        docker build --build-arg "VERSION=$VERSION" \
+          --label "org.opencontainers.image.version=$VERSION" \
+          --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+          -t "local/shipit-$SERVICE:$GITHUB_SHA" "services/$SERVICE"
+
+    - name: Vulnerability scan (block fixable HIGH/CRITICAL)
+      if: steps.ecr.outputs.existing == ''
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        image-ref: local/shipit-${{ inputs.service }}:${{ github.sha }}
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
+        exit-code: "1"
+
+    - name: Install syft
+      if: steps.ecr.outputs.existing == ''
+      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
+    - name: SBOM, push, sign, attest
+      if: steps.ecr.outputs.existing == ''
+      id: push
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        REPO: ${{ steps.ecr.outputs.repo }}
+        REGISTRY: ${{ inputs.registry }}
+      run: |
+        local_ref="local/shipit-$SERVICE:$GITHUB_SHA"
+        syft "$local_ref" -o "spdx-json=sbom-$SERVICE.spdx.json"
+        docker tag "$local_ref" "$REPO:$GITHUB_SHA"
+        docker push "$REPO:$GITHUB_SHA"
+        ref="$(docker inspect --format '{{index .RepoDigests 0}}' "$REPO:$GITHUB_SHA")"
+        cosign sign --yes "$ref"
+        cosign attest --yes --type spdxjson --predicate "sbom-$SERVICE.spdx.json" "$ref"
+        if [[ "$REGISTRY" == ghcr ]]; then
+          # "main" always points at the newest signed build: scripts/release-pull.sh takes it from there.
+          docker tag "$local_ref" "$REPO:main"
+          docker push "$REPO:main"
+        fi
+        echo "image=$ref" >> "$GITHUB_OUTPUT"
+
+    - name: Point "main" at a reused image
+      if: steps.ecr.outputs.existing != '' && inputs.registry == 'ghcr'
+      shell: bash
+      env:
+        EXISTING: ${{ steps.ecr.outputs.existing }}
+        REPO: ${{ steps.ecr.outputs.repo }}
+      run: docker buildx imagetools create --prefer-index=false --tag "$REPO:main" "$EXISTING"
+
+    - name: Result
+      id: result
+      shell: bash
+      env:
+        EXISTING: ${{ steps.ecr.outputs.existing }}
+        PUSHED: ${{ steps.push.outputs.image }}
+        SERVICE: ${{ inputs.service }}
+      run: |
+        image="${PUSHED:-$EXISTING}"
+        echo "image=$image" >> "$GITHUB_OUTPUT"
+        echo "- **$SERVICE**: \`$image\`" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,6 @@
+rules:
+  self-repository:
+    # `uses: $/...` (July 2026) is not supported by actionlint 1.7.12 yet, so the
+    # local composite action and the reusable CI workflow keep the `./` form.
+    ignore:
+      - release.yml

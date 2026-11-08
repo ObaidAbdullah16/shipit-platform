@@ -1,0 +1,6 @@
+# Keep LF line endings even when the repo is cloned on Windows (bash scripts break with CRLF).
+* text=auto eol=lf
+*.sh text eol=lf
+*.png binary
+*.jpg binary
+*.zip binary

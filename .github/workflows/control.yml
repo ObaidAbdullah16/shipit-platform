@@ -1,0 +1,78 @@
+# One-click start / stop / demo from the Actions tab
+# (or: gh workflow run control.yml -f action=up)
+name: Control (start / stop)
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        options: [status, up, down, break-it, rollback, loadtest, down-all]
+        default: status
+
+permissions: {}
+
+concurrency:
+  group: shipit-release
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: aws
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check configuration
+        if: vars.AWS_ROLE_ARN == ''
+        run: |
+          echo "::error::AWS_ROLE_ARN is not set: start the AWS foundation on your laptop first (bash _setup/projects.sh up foundation)"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "<1.18.0"
+          terraform_wrapper: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Is this repository connected to AWS?
+        if: vars.AWS_ROLE_ARN == ''
+        run: |
+          echo "::error::Not connected to AWS (no AWS_ROLE_ARN variable). AWS accounts from the new AWS sign-up cannot let GitHub log in - run it from your laptop instead: bash _setup/projects.sh up shipit (or down)"
+          exit 1
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+          role-session-name: shipit-control
+      - name: Run ${{ inputs.action }}
+        env:
+          ACTION: ${{ inputs.action }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+          # Optional HTTPS on your own domain (repository variables), see README
+          TF_VAR_domain_name: ${{ vars.SHIPIT_DOMAIN }}
+          TF_VAR_hosted_zone_id: ${{ vars.SHIPIT_ZONE_ID }}
+        shell: bash
+        run: |
+          set +e  # keep going to write the summary, then exit with the script's own status
+          case "$ACTION" in
+            up)       bash scripts/up.sh ;;
+            down)     bash scripts/down.sh ;;
+            down-all) bash scripts/down.sh --all ;;
+            break-it) bash scripts/break-it.sh ;;
+            rollback) bash scripts/rollback.sh ;;
+            loadtest) bash scripts/loadtest.sh 120 8 ;;
+            *)        bash scripts/status.sh ;;
+          esac 2>&1 | tee output.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "### ShipIt: $ACTION"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' output.txt | tail -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

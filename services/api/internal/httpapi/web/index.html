@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShipIt Links</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e3e2dc; --accent:#0b6e4f; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141413; --card:#1f1f1d; --ink:#ecebe6; --muted:#a3a29c; --line:#34342f; --accent:#4cc38a; --bad:#f97066; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  p.lead { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=url] { flex: 1 1 320px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; }
+  button { padding: 10px 16px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 4px 10px; font-weight: 500; }
+  .result { margin-top: 12px; word-break: break-all; }
+  .error { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  td.url { word-break: break-all; color: var(--muted); }
+  a { color: var(--accent); }
+  .meta { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: .9rem; }
+  .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+  #stats { white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ShipIt Links</h1>
+  <p class="lead">A tiny link shortener used to demonstrate a secure CI/CD platform: signed images, automatic rollback and real monitoring.</p>
+
+  <section class="card">
+    <form id="create">
+      <input id="url" type="url" aria-label="Long URL" placeholder="https://example.com/a/very/long/link" required maxlength="2048">
+      <button type="submit">Shorten</button>
+    </form>
+    <div id="result" class="result" aria-live="polite"></div>
+  </section>
+
+  <section class="card">
+    <h2 style="margin-top:0;font-size:1.1rem">Recent links</h2>
+    <table>
+      <thead><tr><th>Short</th><th>Target</th><th>Clicks</th></tr></thead>
+      <tbody id="recent"><tr><td colspan="3">Loading…</td></tr></tbody>
+    </table>
+    <div id="stats"></div>
+  </section>
+
+  <div class="meta">
+    <span>Version: <span class="pill" id="version">…</span></span>
+    <span>Health: <span class="pill" id="health">…</span></span>
+    <a href="/metrics">/metrics</a>
+  </div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  async function loadRecent() {
+    try {
+      const res = await fetch("/api/links");
+      const links = await res.json();
+      if (!Array.isArray(links) || links.length === 0) {
+        $("recent").innerHTML = '<tr><td colspan="3">No links yet. Create the first one above.</td></tr>';
+        return;
+      }
+      $("recent").innerHTML = links.map((l) =>
+        `<tr><td><a href="/r/${esc(l.code)}" target="_blank" rel="noopener">${esc(l.code)}</a></td>` +
+        `<td class="url">${esc(l.url)}</td>` +
+        `<td><button class="secondary" data-code="${esc(l.code)}">stats</button></td></tr>`).join("");
+    } catch (e) {
+      $("recent").innerHTML = '<tr><td colspan="3" class="error">Could not load links.</td></tr>';
+    }
+  }
+
+  $("recent").addEventListener("click", async (ev) => {
+    const code = ev.target.dataset && ev.target.dataset.code;
+    if (!code) return;
+    const res = await fetch(`/api/links/${encodeURIComponent(code)}/stats`);
+    const s = await res.json();
+    $("stats").textContent = res.ok
+      ? `${code}: ${s.total} clicks (${s.processed} processed by the worker, ${s.pending} waiting in the queue)`
+      : (s.error || "error");
+  });
+
+  $("create").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    $("result").textContent = "Saving…";
+    $("result").className = "result";
+    try {
+      const res = await fetch("/api/links", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: $("url").value }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || res.statusText);
+      $("result").innerHTML = `Short link: <a href="${esc(body.short_url)}" target="_blank" rel="noopener">${esc(body.short_url)}</a>`;
+      $("url").value = "";
+      loadRecent();
+    } catch (e) {
+      $("result").textContent = e.message;
+      $("result").className = "result error";
+    }
+  });
+
+  fetch("/version").then((r) => r.json()).then((v) => { $("version").textContent = v.version; }).catch(() => {});
+  fetch("/healthz").then((r) => { $("health").textContent = r.ok ? "ok" : "failing"; }).catch(() => { $("health").textContent = "down"; });
+  loadRecent();
+</script>
+</body>
+</html>

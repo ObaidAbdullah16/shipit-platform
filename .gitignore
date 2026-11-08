@@ -1,0 +1,41 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Go
+/bin/
+*.test
+coverage.out
+cover.out
+
+# Terraform (state lives in S3; never commit it or real tfvars)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+tfplan
+*.tfplan
+
+# Secrets that must never be committed
+.env
+.env.*
+*.pem
+*.key
+credentials*.json

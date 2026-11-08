@@ -1,0 +1,192 @@
+# Every push and pull request: tests with real Postgres/Redis, image builds,
+# vulnerability/secret/IaC scanning and workflow linting. The Release workflow
+# calls this same file, so nothing ships without passing it.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow_ref }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  api:
+    name: API (Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shipit_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
+    defaults:
+      run:
+        working-directory: services/api
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/shipit_test?sslmode=disable
+      REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: stable
+          cache-dependency-path: services/api/go.sum
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test -race -count=1 -coverprofile=cover.out ./...
+      - name: Coverage
+        run: go tool cover -func=cover.out | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: govulncheck (known vulnerabilities in code paths we actually call)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  worker:
+    name: Worker (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shipit_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
+    defaults:
+      run:
+        working-directory: services/worker
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/shipit_test
+      REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check . && ruff format --check .
+      - run: pytest -q
+
+  containers:
+    name: Container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Hadolint (API)
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: services/api/Dockerfile
+      - name: Hadolint (worker)
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: services/worker/Dockerfile
+      - name: Build images
+        run: |
+          docker build --build-arg VERSION=ci -t shipit-api:ci services/api
+          docker build -t shipit-worker:ci services/worker
+      - name: Trivy scan (API image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: shipit-api:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Trivy scan (worker image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: shipit-worker:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Smoke test with docker compose
+        run: |
+          docker compose up -d --wait --build
+          # The API has no container health check (distroless has no curl), so
+          # "running" can come a moment before it listens: wait for /healthz.
+          for _ in $(seq 1 30); do curl -fsS localhost:8080/healthz && break; sleep 1; done
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/api/links -H 'Content-Type: application/json' -d '{"url":"https://example.com"}')"
+          test "$code" = 201
+          curl -fsS localhost:8080/readyz
+      - name: Compose logs
+        if: failure()
+        run: docker compose logs
+
+  iac:
+    name: Terraform, scripts and workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "<1.18.0"
+          terraform_wrapper: false
+      - run: pip install checkov shellcheck-py actionlint-py zizmor
+      - run: terraform fmt -check -recursive infra
+      - name: terraform validate
+        run: |
+          for d in infra/bootstrap infra/app; do
+            terraform -chdir="$d" init -backend=false -input=false >/dev/null
+            terraform -chdir="$d" validate
+          done
+      - run: checkov -d infra --framework terraform --config-file .checkov.yaml --quiet --compact
+      - run: shellcheck -x -P SCRIPTDIR scripts/*.sh
+      - run: actionlint
+      - run: zizmor --min-severity low .github
+
+  security:
+    name: Secrets and code scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+      - run: pip install semgrep
+      # Terraform is covered by checkov in the iac job. All findings are printed;
+      # only ERROR-severity ones fail the build.
+      - name: Semgrep (Go, Python, Dockerfile and secrets rules)
+        run: |
+          semgrep scan --metrics off --config p/golang --config p/python --config p/dockerfile --config p/secrets
+          semgrep scan --metrics off --quiet --severity ERROR --error --config p/golang --config p/python --config p/dockerfile --config p/secrets
