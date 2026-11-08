@@ -15,5 +15,6 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/api /api
 EXPOSE 8080
-USER nonroot:nonroot
+# Numeric ids (= distroless "nonroot") so Kubernetes/ECS can verify it is not root (hadolint DL3066).
+USER 65532:65532
 ENTRYPOINT ["/api"]

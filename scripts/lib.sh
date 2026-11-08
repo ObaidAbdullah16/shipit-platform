@@ -182,8 +182,9 @@ import_release_from_ghcr() {
   need docker cosign jq
   docker info >/dev/null 2>&1 || die "Docker Desktop must be running (it reads the images on ghcr.io) - start it and try again"
   local api_line worker_line version src dst digest api_ecr worker_ecr
-  api_line="$(newest_ghcr_image api)" && worker_line="$(newest_ghcr_image worker)" || die \
-    "No ShipIt images on ghcr.io yet, or they are private. Run the Release workflow (Actions > Release > Run workflow, ~15 minutes), then make both packages public once: GitHub > your profile > Packages > shipit-api / shipit-worker > Package settings > Change visibility > Public (Guide 05)."
+  if ! api_line="$(newest_ghcr_image api)" || ! worker_line="$(newest_ghcr_image worker)"; then
+    die "No ShipIt images on ghcr.io yet, or they are private. Run the Release workflow (Actions > Release > Run workflow, ~15 minutes), then make both packages public once: GitHub > your profile > Packages > shipit-api / shipit-worker > Package settings > Change visibility > Public (Guide 05)."
+  fi
   version="${api_line#* }"
   [[ "${worker_line#* }" == "$version" ]] || warn "api and worker images come from different builds (${version} / ${worker_line#* }) - using both anyway"
   log "Newest signed release on ghcr.io: $version"
