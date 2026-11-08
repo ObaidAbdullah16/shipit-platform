@@ -124,12 +124,23 @@ def process_once(r: redis.Redis, conn: psycopg.Connection, block_seconds: int = 
     return len(events)
 
 
+_heartbeat_warned = False
+
+
 def heartbeat() -> None:
+    """Touch the file the container health check reads. If it cannot be written the task is
+    marked unhealthy and replaced, so say why once instead of failing silently."""
+    global _heartbeat_warned
     try:
         with open(HEARTBEAT_FILE, "w", encoding="utf-8") as fh:
             fh.write(str(int(time.time())))
-    except OSError:
-        pass
+    except OSError as exc:
+        if not _heartbeat_warned:
+            log.error(
+                "cannot write the heartbeat file: the health check will fail",
+                extra={"fields": {"path": HEARTBEAT_FILE, "error": str(exc)}},
+            )
+            _heartbeat_warned = True
 
 
 def wait_for_schema(conn: psycopg.Connection, timeout: float = 120) -> None:
@@ -142,6 +153,7 @@ def wait_for_schema(conn: psycopg.Connection, timeout: float = 120) -> None:
         if time.monotonic() > deadline:
             raise SystemExit("daily_clicks table not found: is the API running?")
         log.info("waiting for the API to create the schema")
+        heartbeat()  # still alive while waiting
         time.sleep(3)
 
 
