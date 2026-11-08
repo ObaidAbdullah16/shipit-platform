@@ -1,0 +1,7 @@
+# CI tools for the lint jobs, pinned so a new tool release cannot break main overnight.
+# Dependabot (.github/dependabot.yml) proposes updates as pull requests, where CI shows
+# whether the new version still passes.
+checkov==3.4.3
+shellcheck-py==0.11.0.1
+actionlint-py==1.7.12.25
+zizmor==1.32.0

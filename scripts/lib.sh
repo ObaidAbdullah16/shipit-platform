@@ -93,10 +93,24 @@ put_release() {
   aws ssm put-parameter --name "$1" --type String --overwrite --value "$json" >/dev/null
 }
 
-ecr_login_for_cosign() { # lets cosign read signatures stored in ECR
-  local registry="${1%%/*}"
-  aws ecr get-login-password | cosign login "$registry" -u AWS --password-stdin >/dev/null 2>&1 \
-    || die "cosign could not log in to $registry"
+# cosign keeps its registry logins in its own file. In WSL, Docker Desktop's credential store
+# (desktop.exe -> Windows Credential Manager) refuses ECR's login token, which is too long for it.
+COSIGN_DOCKER_CONFIG="${COSIGN_DOCKER_CONFIG:-$HOME/.cache/shipit/cosign-docker}"
+cosign_() {
+  if [[ ! -f "$COSIGN_DOCKER_CONFIG/config.json" ]]; then
+    mkdir -p "$COSIGN_DOCKER_CONFIG" && chmod 700 "$COSIGN_DOCKER_CONFIG"
+    (umask 077 && echo '{}' > "$COSIGN_DOCKER_CONFIG/config.json")
+  fi
+  DOCKER_CONFIG="$COSIGN_DOCKER_CONFIG" cosign "$@"
+}
+
+ecr_login_for_cosign() { # lets cosign read and write images and signatures in ECR
+  local registry="${1%%/*}" region token out
+  region="$(cut -d. -f4 <<<"$registry")"   # <account>.dkr.ecr.<region>.amazonaws.com
+  token="$(aws ecr get-login-password --region "$region")" \
+    || die "Could not get an ECR login token in $region - are you logged in? bash _setup/aws-login.sh"
+  out="$(printf '%s' "$token" | cosign_ login "$registry" -u AWS --password-stdin 2>&1)" \
+    || die "cosign could not log in to $registry: $out"
 }
 
 # verify_signature <image@digest>: only images signed by this repository's release
@@ -109,12 +123,21 @@ verify_signature() {
   command -v cosign >/dev/null 2>&1 \
     || die "cosign is needed to verify images (see _setup/install-tools-wsl.sh) - or set SKIP_VERIFY=1"
   [[ -n "$GITHUB_OWNER" ]] || die "Set GITHUB_OWNER (in _setup/config.env) so the signer identity can be checked"
-  [[ "$1" == *.dkr.ecr.*.amazonaws.com/* ]] && ecr_login_for_cosign "$1"
-  cosign verify "$1" \
+  local ref="$1" check="$1" svc out hint=""
+  if project_account && [[ "$ref" == *.dkr.ecr.*.amazonaws.com/* ]]; then
+    # Project accounts copy the images from ghcr.io into ECR by digest. cosign 3 keeps signatures as
+    # Sigstore bundles that 'cosign copy' does not carry, so check the same digest on ghcr.io:
+    # a digest is a hash of the image, so it is the same image that CI signed.
+    svc="${ref%@*}"; svc="${svc##*/}"
+    check="$(ghcr_repo "$svc")@${ref##*@}"
+    hint=" (checked on ghcr.io: the shipit-$svc package must still exist and be public)"
+  fi
+  [[ "$check" == *.dkr.ecr.*.amazonaws.com/* ]] && ecr_login_for_cosign "$check"
+  out="$(cosign_ verify "$check" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
     --certificate-identity "https://github.com/${GITHUB_OWNER}/shipit-platform/.github/workflows/release.yml@refs/heads/main" \
-    >/dev/null 2>&1 || die "Signature check FAILED for $1 - refusing to deploy an image CI did not sign"
-  log "Signature OK: ${1##*/}"
+    2>&1 >/dev/null)" || die "Signature check FAILED for $ref$hint - refusing to deploy an image CI did not sign. cosign said: ${out##*$'\n'}"
+  log "Signature OK: ${ref##*/}"
 }
 
 app_is_up() {
@@ -163,16 +186,15 @@ newest_ghcr_image() {
 # wait_for_public_ghcr: GitHub publishes new packages as private. The laptop reads them without a
 # GitHub login, so both must be made public once (GitHub has no API for that - it is two clicks).
 wait_for_public_ghcr() {
-  local owner tries=0
-  owner="$(tr '[:upper:]' '[:lower:]' <<<"${GITHUB_OWNER:-ObaidAbdullah16}")"
+  local tries=0 owner="${GITHUB_OWNER:-ObaidAbdullah16}"
   while ! newest_ghcr_image api >/dev/null 2>&1 || ! newest_ghcr_image worker >/dev/null 2>&1; do
     [[ -t 0 && $tries -lt 5 ]] || return 0   # not interactive, or given up: import_release_from_ghcr explains
     tries=$((tries + 1))
     echo
     log "One-time step: make the two new packages public (they hold only the public demo app):"
-    echo "    https://github.com/users/$owner/packages/container/shipit-api/settings"
-    echo "    https://github.com/users/$owner/packages/container/shipit-worker/settings"
-    echo "  On each page: Danger Zone > Change visibility > Public > type the name > I understand..."
+    echo "    https://github.com/$owner/shipit-platform/pkgs/container/shipit-api"
+    echo "    https://github.com/$owner/shipit-platform/pkgs/container/shipit-worker"
+    echo "  On each page: Package settings (right-hand column) > Danger Zone > Change visibility > Public > type the name > I understand..."
     read -r -p "Press Enter when both are public (Ctrl+C to stop): " _ || return 0
   done
 }
@@ -181,9 +203,9 @@ wait_for_public_ghcr() {
 import_release_from_ghcr() {
   need docker cosign jq
   docker info >/dev/null 2>&1 || die "Docker Desktop must be running (it reads the images on ghcr.io) - start it and try again"
-  local api_line worker_line version src dst digest api_ecr worker_ecr
+  local api_line worker_line version src dst digest api_ecr worker_ecr out
   if ! api_line="$(newest_ghcr_image api)" || ! worker_line="$(newest_ghcr_image worker)"; then
-    die "No ShipIt images on ghcr.io yet, or they are private. Run the Release workflow (Actions > Release > Run workflow, ~15 minutes), then make both packages public once: GitHub > your profile > Packages > shipit-api / shipit-worker > Package settings > Change visibility > Public (Guide 05)."
+    die "No ShipIt images on ghcr.io yet, or they are private. Run the Release workflow (Actions > Release > Run workflow, ~15 minutes), then make both packages public once: https://github.com/${GITHUB_OWNER:-ObaidAbdullah16}/shipit-platform/pkgs/container/shipit-api (and shipit-worker) > Package settings > Danger Zone > Change visibility > Public (Guide 05)."
   fi
   version="${api_line#* }"
   [[ "${worker_line#* }" == "$version" ]] || warn "api and worker images come from different builds (${version} / ${worker_line#* }) - using both anyway"
@@ -199,8 +221,8 @@ import_release_from_ghcr() {
     if aws ecr describe-images --repository-name "${dst#*/}" --image-ids "imageDigest=$digest" >/dev/null 2>&1; then
       log "${dst##*/} $version is already in ECR"
     else
-      log "Copying ${src##*/} into ECR with its signature and SBOM"
-      cosign copy "$src" "$dst:$version" >/dev/null || die "cosign copy failed for $src"
+      log "Copying ${src##*/} into ECR (same digest; its signature stays on ghcr.io)"
+      out="$(cosign_ copy "$src" "$dst:$version" 2>&1 >/dev/null)" || die "cosign copy failed for $src: ${out##*$'\n'}"
     fi
   done
   # The release record points at ECR (same digests as on ghcr.io); check the copied signatures once more.

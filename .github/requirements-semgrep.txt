@@ -1,0 +1,4 @@
+# CI tools for the lint jobs, pinned so a new tool release cannot break main overnight.
+# Dependabot (.github/dependabot.yml) proposes updates as pull requests, where CI shows
+# whether the new version still passes.
+semgrep==1.184.0

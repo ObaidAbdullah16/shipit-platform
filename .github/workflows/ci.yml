@@ -19,7 +19,7 @@ concurrency:
 jobs:
   api:
     name: API (Go)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
       postgres:
@@ -55,13 +55,14 @@ jobs:
       - run: go test -race -count=1 -coverprofile=cover.out ./...
       - name: Coverage
         run: go tool cover -func=cover.out | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
-      # govulncheck before v1.2.0 does not build with Go 1.27 ("stable" above), so keep this current.
+      # The newest govulncheck with the newest Go ("stable" above): an old pinned govulncheck stopped
+      # building when Go 1.27 came out (Nov 2026). The Go team releases the two to work together.
       - name: govulncheck (known vulnerabilities in code paths we actually call)
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   worker:
     name: Worker (Python)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
       postgres:
@@ -96,7 +97,7 @@ jobs:
 
   containers:
     name: Container images
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -143,7 +144,7 @@ jobs:
 
   iac:
     name: Terraform, scripts and workflows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -156,7 +157,7 @@ jobs:
         with:
           terraform_version: "<1.18.0"
           terraform_wrapper: false
-      - run: pip install checkov shellcheck-py actionlint-py zizmor
+      - run: pip install -r .github/requirements-ci.txt
       - run: terraform fmt -check -recursive infra
       - name: terraform validate
         run: |
@@ -171,7 +172,7 @@ jobs:
 
   security:
     name: Secrets and code scanning
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -184,7 +185,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.13"
-      - run: pip install semgrep
+      - run: pip install -r .github/requirements-semgrep.txt
       # Terraform is covered by checkov in the iac job. All findings are printed;
       # only ERROR-severity ones fail the build.
       - name: Semgrep (Go, Python, Dockerfile and secrets rules)

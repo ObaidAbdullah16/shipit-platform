@@ -34,7 +34,7 @@ jobs:
     name: Container registry
     needs: ci
     if: vars.AWS_ROLE_ARN != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: aws
     permissions:
@@ -119,7 +119,7 @@ jobs:
   deploy:
     name: Record and deploy
     needs: [prepare, build-api, build-worker]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: aws
     permissions:
@@ -214,7 +214,7 @@ jobs:
   ghcr-next-step:
     name: Next step (on your laptop)
     needs: [build-api-ghcr, build-worker-ghcr]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     steps:

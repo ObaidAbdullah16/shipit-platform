@@ -15,7 +15,7 @@ concurrency:
 jobs:
   stop:
     if: vars.AWS_ROLE_ARN != '' && vars.AUTO_STOP != 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: aws
     permissions:
