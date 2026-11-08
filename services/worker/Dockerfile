@@ -6,9 +6,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Debian security fixes released after the base image was built (Trivy blocks fixable HIGH/CRITICAL).
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-compile -r requirements.txt
+# pip is only needed while building. Removing it also removes the libraries it bundles
+# (urllib3, msgpack, setuptools...), which Trivy reports even though the worker never uses them.
+RUN pip install --no-compile -r requirements.txt \
+    && pip uninstall -y pip
 
 COPY worker.py healthcheck.py ./
 
