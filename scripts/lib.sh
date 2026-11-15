@@ -46,6 +46,17 @@ tf_init() {
     -backend-config="region=${AWS_REGION}" \
     -backend-config="use_lockfile=true" \
     -backend-config="encrypt=true" >/dev/null
+  # A run that lost its AWS login half-way leaves errored.tfstate behind: upload it first, or
+  # Terraform would work from the older state in S3.
+  if [[ -f "$dir/errored.tfstate" ]]; then
+    printf '[state] Uploading the state an interrupted run could not save (errored.tfstate)\n' >&2
+    if terraform -chdir="$dir" state push errored.tfstate; then
+      mv "$dir/errored.tfstate" "$dir/errored.tfstate.uploaded-$(date +%Y%m%d-%H%M%S)"
+    else
+      printf '[state] Could not upload %s/errored.tfstate - if the state is locked, see the guide: "Error acquiring the state lock"\n' "$dir" >&2
+      return 1
+    fi
+  fi
 }
 
 tf_apply() { # tf_apply <dir> [extra args...]
@@ -138,6 +149,26 @@ verify_signature() {
     --certificate-identity "https://github.com/${GITHUB_OWNER}/shipit-platform/.github/workflows/release.yml@refs/heads/main" \
     2>&1 >/dev/null)" || die "Signature check FAILED for $ref$hint - refusing to deploy an image CI did not sign. cosign said: ${out##*$'\n'}"
   log "Signature OK: ${ref##*/}"
+}
+
+# explain_stopped_tasks <cluster> [log group]: why ECS stopped the most recent tasks (it keeps
+# stopped tasks for about an hour), each container's health and exit code, and the last log lines.
+explain_stopped_tasks() {
+  local cluster="$1" group="${2:-/ecs/shipit}" arns
+  arns="$(aws ecs list-tasks --cluster "$cluster" --desired-status STOPPED --query 'taskArns[:2]' --output text 2>/dev/null \
+    | tr '\t' ' ' | sed 's/None//')"
+  echo "Why the last tasks stopped:"
+  if [[ -z "${arns// /}" ]]; then
+    echo "  (no stopped tasks in the last hour)"
+  else
+    # shellcheck disable=SC2086  # word splitting wanted: one argument per task ARN
+    aws ecs describe-tasks --cluster "$cluster" --tasks $arns --output json | jq -r '.tasks[] |
+      "  task \(.taskArn | split("/") | last): \(.stoppedReason // "-")",
+      (.containers[] | "    \(.name): health=\(.healthStatus // "-") exit=\(.exitCode // "-") \(.reason // "")"),
+      (.containers[] | select(.name == "worker" or .name == "api") | "    \(.name) image: \(.image | split("/") | last)")'
+  fi
+  echo "Last log lines (${group}):"
+  aws logs tail "$group" --since 30m 2>/dev/null | tail -20 | cut -c1-220 | sed 's/^/  /' || echo "  (none)"
 }
 
 app_is_up() {

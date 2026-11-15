@@ -30,5 +30,8 @@ echo "Deployments:"
 jq -r '.deployments[] | "  \(.status) \(.taskDefinition | split("/")[1]) rollout=\(.rolloutState) running=\(.runningCount)"' <<<"$svc"
 echo "Recent events:"
 jq -r '.events[:5][] | "  \(.createdAt) \(.message)"' <<<"$svc"
+if [[ "$(jq -r '.runningCount < .desiredCount' <<<"$svc")" == "true" ]]; then
+  explain_stopped_tasks "$cluster" "$(tf_out "$TF_APP" log_group)" || true
+fi
 echo "Alarms in ALARM state:"
 aws cloudwatch describe-alarms --alarm-name-prefix shipit- --state-value ALARM --query 'MetricAlarms[].AlarmName' --output text | tr '\t' '\n' | sed 's/^/  /'

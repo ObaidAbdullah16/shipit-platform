@@ -17,7 +17,11 @@ verify_signature "$worker"
 
 log "Terraform apply (takes ~10 minutes the first time: RDS and the load balancer are slow to create)"
 tf_init "$TF_APP" "shipit-platform/app.tfstate"
-tf_apply "$TF_APP" -var "api_image=$api" -var "worker_image=$worker"
+if ! tf_apply "$TF_APP" -var "api_image=$api" -var "worker_image=$worker"; then
+  echo
+  explain_stopped_tasks shipit || true
+  die "Terraform could not finish. The reason is above; the stack keeps costing ~\$0.10/hour until: bash _setup/projects.sh down shipit"
+fi
 url="$(tf_out "$TF_APP" url)"
 
 # Already running an older release? Roll the newest one out the normal way.

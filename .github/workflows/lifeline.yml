@@ -1,0 +1,27 @@
+# Weekly Lifeline scorecard of this repository: https://github.com/ObaidAbdullah16/lifeline
+# The facts it cannot see from outside (backups, money) are in lifeline.yml in the repository root.
+name: Lifeline
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # every Monday
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scorecard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write            # opens an issue when the score drops
+      security-events: write   # failing checks go to the Security tab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ObaidAbdullah16/lifeline@3446217f484ec6473c3f0d829b30c98318da8a10 # v0.3.2
+        with:
+          open-issue-on-drop: "true"
+          upload-sarif: "true"
+          fail-under: "0"

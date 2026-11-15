@@ -68,6 +68,7 @@ while :; do
     reason="$(jq -r --arg td "$new_td" '[.deployments[] | select(.taskDefinition == $td)][0].rolloutStateReason // "circuit breaker triggered"' <<<"$svc")"
     warn "Deployment FAILED after ${elapsed}s: $reason"
     warn "ECS rolled back automatically to ${primary##*/} - users kept being served by the previous release."
+    explain_stopped_tasks "$cluster" || true
     exit 1
   fi
   (( elapsed < 1200 )) || die "Deployment still in progress after 20 minutes - check: bash scripts/status.sh"
